@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>錄用通知單產生器</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+  <!--<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.2/mammoth.browser.min.js"></script> -->
+  <script src="libs/mammoth.browser.min.js"></script>
+  
+  <style>
+    body { font-family: "DFKai-SB", "標楷體", serif; padding: 20px; }
+    input, button { margin: 5px 0; padding: 5px; }
+    #previewArea {
+      margin-top: 30px;
+      padding: 20px;
+      border: 1px solid #ccc;
+      background: #f8f8f8;
+      line-height: 1.8;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <h2>上傳 Word 樣板並填寫資料</h2>
+  <label>上傳 Word 樣板（含 {{變數}}）：<input type="file" id="templateInput" accept=".docx"></label><br>
+  <label>報到日期（如 113年5月10日）：<input type="text" id="date"></label><br>
+  <label>姓名：<input type="text" id="name"></label><br>
+  <label>職稱：<input type="text" id="jobTitle"></label><br>
+  <label>本薪（NTD）：<input type="number" id="baseSalary"></label><br>
+  <button onclick="previewTemplate()">預覽通知單</button>
+  <button onclick="downloadTemplate()">下載 Word</button>
+
+  <h3>預覽內容：</h3>
+  <div id="previewArea">尚未產生預覽</div>
+
+  <script>
+    let lastGeneratedBlob = null;
+
+    function getData() {
+      const name = document.getElementById("name").value;
+      const date = document.getElementById("date").value;
+      const jobTitle = document.getElementById("jobTitle").value;
+      const base = parseInt(document.getElementById("baseSalary").value) || 0;
+      const meal = 1200;
+      const transport = 900;
+      const totalSalary = base + meal + transport;
+
+      return {
+        name,
+        date,
+        jobTitle,
+        baseSalary: base.toLocaleString(),
+        meal: meal.toLocaleString(),
+        transport: transport.toLocaleString(),
+        totalSalary: totalSalary.toLocaleString()
+      };
+    }
+
+    async function generateTemplateBlob(data) {
+      const file = document.getElementById("templateInput").files[0];
+      if (!file) {
+        alert("請先上傳樣板！");
+        return null;
+      }
+      const arrayBuffer = await file.arrayBuffer();
+      const zip = await JSZip.loadAsync(arrayBuffer);
+      let docXml = await zip.file("word/document.xml").async("text");
+
+      console.log("original XML p:", docXml.substring(0, 500)); // 只顯示前500字避免過長
+      //console.log("測試直接替換 jobTitle:", data.jobTitle);
+      //docXml = docXml.replace(/{{jobTitle}}/g, data.jobTitle);
+      //new code
+// 將拆散的 {{variable}} 合併為一個 w:t
+  // 第一步：處理被 <w:r> 拆斷的 {{變數}}
+    docXml = docXml.replace(
+    /<w:t>\{\{<\/w:t>(\s*<w:r.*?>.*?<\/w:r>\s*)+?<w:t>\}\}<\/w:t>/g,
+    match => {
+      const key = match.replace(/<[^>]+>/g, '').replace(/\s+/g, '').replace('{{', '').replace('}}', '');
+      if (!data.hasOwnProperty(key)) console.warn("no find key:", key);
+      return `<w:t>{{${key}}}</w:t>`;
+    }
+  );
+
+  // 第二步：處理普通拆斷的情況（例如被分段但沒 <w:r> 的）
+  docXml = docXml.replace(
+    /<w:t>\{\{<\/w:t>([\s\S]*?)<w:t>\}\}<\/w:t>/g,
+    match => {
+      const key = match.replace(/<[^>]+>/g, '').replace(/\s+/g, '').replace('{{', '').replace('}}', '');
+      if (!data.hasOwnProperty(key)) console.warn("no find key:", key);
+      return `<w:t>{{${key}}}</w:t>`;
+    }
+  );
+
+  // 第三步：替換 {{變數}} 為實際資料
+  docXml = docXml.replace(/\{\{\s*(\w+)\s*\}\}/g, (match, key) => {
+    if (data.hasOwnProperty(key)) {
+      return data[key];
+    } else {
+      console.warn("no varname:", key);
+      return match; // 保留原樣以避免破壞結構
+    }
+  });
+  const remaining = docXml.match(/\{\{\s*\w+\s*\}\}/g);
+  if (remaining) {
+    console.warn(" not change varname：", remaining);
+  }
+  // 將被拆開的變數合併
+  //old code
+  /*
+     docXml = docXml.replace(
+      /<w:t>\{\{<\/w:t>([\s\S]*?)<w:t>\}\}<\/w:t>/g, 
+      match => {
+       const cleaned = match.replace(/<[^>]+>/g, '').replace(/\s+/g, '');
+     const varName = cleaned.replace('{{', '').replace('}}', '');
+      console.log("varName:", match, "analysis varname:", varName);
+      return `<w:t>{{${varName}}}</w:t>`;
+    });
+*/
+    //console.log("data be replaced:", data);
+/*
+  for (const key in data) {
+    const regex = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
+    docXml = docXml.replace(regex, data[key]);
+  }
+    */
+  console.log("after convert XML p:", docXml.substring(0, 500));
+
+      zip.file("word/document.xml", docXml);
+      return zip.generateAsync({ type: "blob" });
+    }
+
+    async function previewTemplate() {
+      const data = getData();
+      //console.log("data for preview:", data);
+      const blob = await generateTemplateBlob(data);
+      if (!blob) return;
+      lastGeneratedBlob = blob;
+
+      const html = await mammoth.convertToHtml({ arrayBuffer: await blob.arrayBuffer() });
+      //console.log("after convert HTML:", html.value);
+      document.getElementById("previewArea").innerHTML = html.value;
+    }
+
+    function downloadTemplate() {
+      if (!lastGeneratedBlob) {
+        alert("請先點選『預覽通知單』產生內容");
+        return;
+      }
+
+      const name = document.getElementById("name").value || "無名";
+      saveAs(lastGeneratedBlob, `錄用通知單_${name}.docx`);
+
+      // 清空輸入欄位與預覽區
+      document.getElementById("name").value = "";
+      document.getElementById("date").value = "";
+      document.getElementById("jobTitle").value = "";
+      document.getElementById("baseSalary").value = "";
+      document.getElementById("previewArea").innerHTML = "尚未產生預覽";
+      lastGeneratedBlob = null;
+    }
+  </script>
+</body>
+</html>
